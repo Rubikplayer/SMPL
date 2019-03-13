@@ -4,13 +4,20 @@ import torch
 from torch.nn import Module
 import os
 
+torch_version = float( torch.__version__[0:3] )
+
+# -----------------------------------------------------------------------------
 
 class SMPLModel(Module):
-  def __init__(self, device=None, model_path='./model.pkl'):
+  def __init__(self, device=None, model_path=None):
     
     super(SMPLModel, self).__init__()
+    # with open(model_path, 'rb') as f:
+    #   params = pickle.load(f)
     with open(model_path, 'rb') as f:
-      params = pickle.load(f)
+      params = np.load( f )
+      print( "loaded smpl model from %s" % ( model_path ) )
+
     self.J_regressor = torch.from_numpy(
       np.array(params['J_regressor'].todense())
     ).type(torch.float64)
@@ -42,7 +49,11 @@ class SMPLModel(Module):
     """
     #r = r.to(self.device)
     eps = r.clone().normal_(std=1e-8)
-    theta = torch.norm(r + eps, dim=(1, 2), keepdim=True)  # dim cannot be tuple
+
+    if torch_version >= 1.0:
+      theta = torch.norm(r + eps, dim=(1, 2), keepdim=True)  # dim cannot be tuple
+    else:
+      theta = torch.norm( (r+eps).squeeze(1), dim=1 )[:,None,None]
     theta_dim = theta.shape[0]
     r_hat = r / theta
     cos = torch.cos(theta)
@@ -129,7 +140,12 @@ class SMPLModel(Module):
       i: id_to_col[self.kintree_table[0, i]]
       for i in range(1, self.kintree_table.shape[1])
     }
-    v_shaped = torch.tensordot(self.shapedirs, betas, dims=([2], [0])) + self.v_template
+
+    if torch_version >= 1.0:
+      v_shaped = torch.tensordot(self.shapedirs, betas, dims=([2], [0])) + self.v_template
+    else:
+      v_shaped = torch.matmul(self.shapedirs, betas) + self.v_template
+
     J = torch.matmul(self.J_regressor, v_shaped)
     R_cube_big = self.rodrigues(pose.view(-1, 1, 3))
 
@@ -140,7 +156,10 @@ class SMPLModel(Module):
       I_cube = (torch.eye(3, dtype=torch.float64).unsqueeze(dim=0) + \
         torch.zeros((R_cube.shape[0], 3, 3), dtype=torch.float64)).to(self.device)
       lrotmin = torch.reshape(R_cube - I_cube, (-1, 1)).squeeze()
-      v_posed = v_shaped + torch.tensordot(self.posedirs, lrotmin, dims=([2], [0]))
+      if torch_version >= 1.0:
+        v_posed = v_shaped + torch.tensordot(self.posedirs, lrotmin, dims=([2], [0]))
+      else:
+        v_posed = v_shaped + torch.matmul(self.posedirs, lrotmin)
 
     results = []
     results.append(
@@ -170,7 +189,10 @@ class SMPLModel(Module):
           )
         )
       )
-    T = torch.tensordot(self.weights, results, dims=([1], [0]))
+    if torch_version >= 1.0:
+      T = torch.tensordot(self.weights, results, dims=([1], [0]))
+    else:
+      T = torch.matmul(self.weights, results.view(-1,4*4)).view(-1,4,4)
     rest_shape_h = torch.cat(
       (v_posed, torch.ones((v_posed.shape[0], 1), dtype=torch.float64).to(self.device)), dim=1
     )
@@ -197,9 +219,10 @@ def test_gpu(gpu_id=[0]):
   betas = torch.from_numpy((np.random.rand(beta_size) - 0.5) * 0.06) \
           .type(torch.float64).to(device)
   trans = torch.from_numpy(np.zeros(3)).type(torch.float64).to(device)
-  outmesh_path = './smpl_torch.obj'
+  outmesh_path = './test/smpl_torch.obj'
 
-  model = SMPLModel(device=device)
+  model_path = './models/model_female_py3.pkl'
+  model = SMPLModel(device=device, model_path=model_path)
   result = model(betas, pose, trans)
   model.write_obj(result, outmesh_path)
 
